@@ -1,0 +1,2 @@
+faster-whisper>=1.2.0
+ctranslate2>=4.0.0

@@ -1,0 +1,111 @@
+# video-digest-toolkit
+
+按帧、按段、按整条 —— 三种代价读一条视频，而不是先下 55 MB 再说。
+
+面向的场景：**你想知道一条视频里讲了什么**，但不需要收藏它。三档代价，先看结构，再听关键段，最后才要全稿。
+
+---
+
+## 为什么是这样设计的（先看这一段，能省你半天）
+
+这几条都是实测出来的，不是猜的：
+
+| 观察到的事实 | 结论 |
+|---|---|
+| 一条 4 分 40 秒视频 **55.4 MB**，其中音轨只有 **1.78 MB（3.2%）** | 「只抽音频能省时间」**不成立**——MP4 把音画交错存，要拿完整音轨就得从头读到尾 |
+| 服务器**支持 Range**（要 1 MB 就回 `206`） | 只取某一段、某几帧**非常便宜**；只有要全稿才值得整条下 |
+| 按秒 seek 取单帧，每次约 **19 秒**（1920×1080，65–220 KB/帧） | 画面**根本不用下载**，直接按时间点截 |
+| 均匀抽 8 帧 ≈ 150 秒；场景切分（23–32 个剪辑点）约 **239 秒**但帧数少八成 | 长视频用场景切分更划算 |
+
+三档：
+
+```
+L0  只看结构   均匀抽 N 帧            下载量 ≈ 几 MB     约半分钟
+L1  听某一段   指定区间抽帧 + 转写     下载量 ≈ 4–12 MB   约 1–2 分钟
+L2  要全稿     整条下载 + 场景切分 + 全片转写   55 MB      约 10 分钟
+```
+
+---
+
+## 三个脚本
+
+| 文件 | 作用 |
+|---|---|
+| `watch.py` | 主入口。选档、抽帧、切场景、调转写、写 `摘要.md` |
+| `fetch.py` | 从 hf-mirror 下 whisper 模型，**自己发 `Range` 头续传** |
+| `asr.py` | 音频 → 带时间戳的中文文字稿（faster-whisper） |
+
+## 依赖
+
+```bash
+python -m venv venv
+# Windows
+venv\Scripts\pip install -r requirements.txt
+```
+
+还需要系统里有 **ffmpeg / ffprobe**（在 `PATH` 里，或用环境变量 `FFMPEG` / `FFPROBE` 指定完整路径）。
+
+## 快速开始
+
+```bash
+# 1) 下模型（约 75 MB，断点续传）
+python fetch.py Systran/faster-whisper-tiny ./models/faster-whisper-tiny
+
+# 2a) 只看结构：均匀抽 8 帧
+python watch.py --url "https://.../video.mp4" --id 123456 --tier L0
+
+# 2b) 听某一段：60–90 秒之间抽帧 + 转写
+python watch.py --url "https://.../video.mp4" --id 123456 --tier L1 --seg 60-90
+
+# 2c) 要全稿
+python watch.py --url "https://.../video.mp4" --id 123456 --tier L2
+```
+
+产物落在 `out/<日期>_<id>/`：
+
+```
+key_01.jpg …   关键帧
+transcript.txt 带时间戳的文字稿（L1/L2）
+raw.wav        16k 单声道音频
+摘要.md        一句话骨架 + 本次实测数字
+```
+
+## 那个 URL 从哪来
+
+浏览器里打开视频，取 `<video>` 元素的 `currentSrc`：
+
+```js
+document.querySelector('video').currentSrc
+```
+
+**注意：**
+
+- 是**带签名的临时直链**，实测约 **3 小时**后失效
+- 如果是 `blob:` 开头，说明走的是 MSE，那条链接**没法直接下载**（见下文"已知限制"）
+- 部分站点需要 `Referer`；本工具默认带 `Referer: https://www.douyin.com/`，别的站点可以改 `HEADERS`
+
+## 已知限制与踩过的坑
+
+1. **`-headers` 只能给 http(s) 源。** 对着本地文件加 `-headers`，ffmpeg 会直接报错，症状是"本地 mp4 明明完好，抽帧和转写全失败"。代码里的 `inp()` 已经处理。
+2. **`blob:` 链接不可用。** MSE 播放的视频拿不到可直接下载的 URL。
+3. **PyAV 与 faster-whisper 的坑**：faster-whisper 1.2.1 会调 `av.open(..., metadata_errors="ignore")`，新版本 PyAV 已不认这个参数 → `TypeError`。`asr.py` 干脆不用 PyAV，自己用标准库 `wave` 读 16k 单声道 PCM。
+4. **GPU 缺库要能退。** Windows 上 ctranslate2 常缺 `cublas64_12.dll`，而且是在**编码阶段**才炸（不是加载时）。`asr.py` 把 GPU→CPU int8 的回退包在 `transcribe` 里，缺库就自动降级。
+5. **代理会拖死下载。** 本工具在启动时清掉 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY`（大小写都清）——实测经代理访问模型 CDN 只有几百字节/秒。**如果你的网络必须走代理才能出网，请把这段删掉。**
+6. **音轨不代表全部内容。** 字幕卡、画面文字、手势演示这类信息在音频里没有。要全就得抽帧看。
+
+## 实测数字（供参考，别当承诺）
+
+| 项目 | 结果 |
+|---|---|
+| 20 秒音频转写 | 2.6 秒（RTF 0.13） |
+| 280 秒音频转写 | 30.7 秒（RTF 0.11） |
+| tiny 模型错字类型 | 同音替代（全→凯、数→属、初中→出中），不是整句崩 |
+| 4:40 视频整条 | 55.4 MB |
+| 仅音轨 | 1.78 MB（3.2%） |
+| 单帧 seek | ≈19 秒，65–220 KB |
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。
+
+工具本身不含任何站点私有内容；抓取与使用请遵守对应平台的服务条款。
