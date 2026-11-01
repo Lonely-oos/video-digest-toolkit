@@ -26,6 +26,8 @@ asr.py —— 把音频文件转成带时间戳的中文文字稿
     ...
     ---- 统计：共 N 段，音频 X 秒，耗时 Y 秒，RTF=Z ----
 """
+import itertools
+import json
 import sys
 import os
 import time
@@ -93,7 +95,17 @@ def main():
             model = WhisperModel(size, device=dev, compute_type=ctype)
             segs, info = model.transcribe(audio_in, language=lang, vad_filter=True,
                                           beam_size=5, initial_prompt=None)
-            segs = list(segs)
+            # VD-05（外部审查 2026-11-01）：原来 list(segs) 把整条转写一次性放进内存，
+            # 长音频的峰值内存随结果规模线性增长。这里改成"先取第一段逼出设备错误
+            # （CUDA 的异常是在遍历时才冒的），之后**边遍历边写 JSONL**"。
+            it = iter(segs)
+            try:
+                first = next(it)
+            except StopIteration:
+                first = None
+            # ⚠️ 这里必须把"已经取出来的第一段"接回去，否则整条转写只剩第一段
+            # （自测时就是这样只剩 1 段的）。
+            segs = itertools.chain([first], it) if first is not None else iter(())
             used = "%s (%s)" % (dev, ctype)
             print("── 设备：%s" % used)
             break
@@ -106,13 +118,24 @@ def main():
 
     t_load = time.time() - t0
 
+    # 流式落盘：段一多也不会把内存吃满；中断时前面的结果还在文件里
+    seg_path = os.environ.get("ASR_SEGMENTS_JSONL") or (audio_in + ".segments.jsonl")
+    max_segs = int(os.environ.get("ASR_MAX_SEGMENTS") or 200000)
+    seg_f = open(seg_path, "w", encoding="utf-8")
     n = 0
     last_end = 0.0
     for s in segs:
+        if n >= max_segs:
+            print("⚠ 段数超过上限 %d，后续段落已截断（ASR_MAX_SEGMENTS 可调）" % max_segs)
+            break
+        seg_f.write(json.dumps({"i": n + 1, "start": round(s.start, 2), "end": round(s.end, 2),
+                                "text": s.text}, ensure_ascii=False) + "\n")
+        seg_f.flush()
         n += 1
         last_end = s.end
         print("[%7.2f → %7.2f] %s" % (s.start, s.end, s.text.strip()))
 
+    seg_f.close()
     audio_len = getattr(info, "duration", last_end) or last_end
     cost = time.time() - t0
     rtf = (cost / audio_len) if audio_len else 0

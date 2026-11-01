@@ -97,7 +97,13 @@ document.querySelector('video').currentSrc
 3. **PyAV 与 faster-whisper 的坑**：faster-whisper 1.2.1 会调 `av.open(..., metadata_errors="ignore")`，新版本 PyAV 已不认这个参数 → `TypeError`。`asr.py` 干脆不用 PyAV，自己用标准库 `wave` 读 16k 单声道 PCM。
 4. **GPU 缺库要能退。** Windows 上 ctranslate2 常缺 `cublas64_12.dll`，而且是在**编码阶段**才炸（不是加载时）。`asr.py` 把 GPU→CPU int8 的回退包在 `transcribe` 里，缺库就自动降级。
 5. **代理会拖死下载。** 本工具在启动时清掉 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY`（大小写都清）——实测经代理访问模型 CDN 只有几百字节/秒。**如果你的网络必须走代理才能出网，请把这段删掉。**
-6. **音轨不代表全部内容。** 字幕卡、画面文字、手势演示这类信息在音频里没有。要全就得抽帧看。
+6. **`--engine-cmd` 之外的失败边界（2026-11-01 按外部审查修）**：
+   - `ffprobe`/`ffmpeg` 非零退出**不再被静默吞掉**（`run(check=True)` 直接抛，带 stderr 尾巴）；
+   - 每个阶段都校验产物（存在且非空），不再用"文件存在"当"这一步成功"；
+   - `206` 响应必须核对 `Content-Range`（起点=本地偏移、总长与已知远端一致），不符就丢弃重来；
+   - 远端大小未知时**不再"非空即成功"**：会检查是否 HTML 错误页、是否有最小体积，
+     并在日志里明确写"大小未知，仅验证了非空且非错误页"。
+7. **音轨不代表全部内容。** 字幕卡、画面文字、手势演示这类信息在音频里没有。要全就得抽帧看。
 
 ## 实测数字（供参考，别当承诺）
 

@@ -60,11 +60,36 @@ def inp(src):
     return []
 
 
-def run(cmd, quiet=True):
+def run(cmd, quiet=True, check=False, what=""):
+    """
+    跑一个子进程。
+
+    VD-02/04（外部审查 2026-11-01）：原来是 `returncode != 0 and not quiet` 才打印，
+    而 quiet 默认 True —— **等于所有 ffmpeg 失败被静默吞掉**，后面的阶段继续跑，
+    甚至把上一轮的旧文件当成本次产物。现在：
+      · check=True 时失败立即抛异常（带 stderr 尾巴），让这一档明确失败
+      · 保留 quiet 参数只控制"要不要打印 stderr"，不再决定"要不要忽略失败"
+    """
     p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if p.returncode != 0 and not quiet:
-        print(p.stderr[-800:])
+    if p.returncode != 0:
+        if not quiet:
+            print(p.stderr[-800:])
+        if check:
+            tail = (p.stderr or "").strip().splitlines()
+            raise RuntimeError("%s 失败（退出码 %d）：%s" %
+                               (what or cmd[0], p.returncode,
+                                tail[-1][:200] if tail else "无 stderr"))
     return p
+
+
+def need_file(path, what, min_bytes=1):
+    """产物校验：文件在、且不是空壳。VD-02：别用"文件存在"代替"这一步成功"。"""
+    if not os.path.exists(path):
+        raise RuntimeError("%s 没有产物：%s" % (what, path))
+    size = os.path.getsize(path)
+    if size < min_bytes:
+        raise RuntimeError("%s 产物过小：%s（%d 字节）" % (what, path, size))
+    return size
 
 
 def probe(url_or_file):
@@ -74,6 +99,8 @@ def probe(url_or_file):
              "-of", "default=nw=1", url_or_file])
     txt = p.stdout
     dur = 0.0
+    if p.returncode != 0:
+        raise RuntimeError("ffprobe 失败（退出码 %d）：%s" % (p.returncode, (p.stderr or '')[-160:]))
     for line in txt.splitlines():
         if line.startswith("duration="):
             try:
@@ -89,7 +116,9 @@ def grab_frames(url, times, outdir, idx_start=1):
     for i, t in enumerate(times):
         dst = os.path.join(outdir, "key_%02d.jpg" % (idx_start + i))
         p = run([FFMPEG, "-hide_banner", "-loglevel", "error"] + inp(url) +
-                 ["-ss", "%.2f" % t, "-i", url, "-frames:v", "1", "-q:v", "2", "-y", dst])
+                 ["-ss", "%.2f" % t, "-i", url, "-frames:v", "1", "-q:v", "2", "-y", dst],
+                check=True, what="抽帧 @%.1fs" % t)
+        need_file(dst, "抽帧 @%.1fs" % t, min_bytes=512)
         if os.path.exists(dst) and os.path.getsize(dst) > 1000:
             made.append((t, dst))
             print("  帧 @%6.1fs → %s" % (t, os.path.basename(dst)), flush=True)
@@ -102,7 +131,8 @@ def scene_times(url_or_file, max_frames=40, threshold=0.25):
     """用 ffmpeg 的场景切换检测找剪辑点（比均匀抽帧准，能省八成帧）"""
     p = run([FFMPEG, "-hide_banner"] + inp(url_or_file) + ["-i", url_or_file,
              "-vf", "select='gt(scene,%s)',metadata=print:file=-" % threshold,
-             "-an", "-f", "null", "-"])
+             "-an", "-f", "null", "-"],
+            check=True, what="场景切分")
     times = [float(m) for m in re.findall(r"pts_time:([\d.]+)", p.stdout + p.stderr)]
     times = sorted(set(times))
     if not times:
@@ -189,8 +219,11 @@ def main():
             mp4 = os.path.join(outdir, "video.mp4")
             print("  L2：整条下载（这一步最慢，主要耗在网络）", flush=True)
             run([FFMPEG, "-hide_banner", "-loglevel", "error", "-headers", HEADERS,
-                 "-i", a.url, "-c", "copy", "-y", mp4])
-            print("  下载完成 %.1f MB" % (os.path.getsize(mp4) / 1048576.0), flush=True)
+                 "-i", a.url, "-c", "copy", "-y", mp4],
+                check=True, what="L2 整条下载")
+            # VD-02：别用"文件存在"当成功。空壳或极小的残缺文件会让后面所有阶段白跑。
+            sz = need_file(mp4, "L2 整条下载", min_bytes=100 * 1024)
+            print("  下载完成 %.1f MB" % (sz / 1048576.0), flush=True)
         times = scene_times(mp4)
         print("  场景切换检测到 %d 个剪辑点" % len(times), flush=True)
         if times:
