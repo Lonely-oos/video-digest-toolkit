@@ -1,0 +1,31 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  offline:
+    name: ${{ matrix.os }} / py ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # 只跑离线可测的那部分（下载完整性/范围校验是纯函数）。
+      # ffmpeg 与 faster-whisper 属于运行期依赖，不在这里装 —— CI 只保证逻辑不被改坏。
+      - name: 下载完整性判定（离线）
+        run: python tests/test_fetch_verify.py
+
+      - name: 语法检查
+        run: |
+          python -m py_compile watch.py fetch.py asr.py
