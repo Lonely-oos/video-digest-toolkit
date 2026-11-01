@@ -126,3 +126,11 @@ document.querySelector('video').currentSrc
 MIT，见 [LICENSE](LICENSE)。
 
 工具本身不含任何站点私有内容；抓取与使用请遵守对应平台的服务条款。
+
+---
+
+## 变更记录
+
+每次行为变化与修掉的真实问题都在 [CHANGELOG.md](CHANGELOG.md)。
+最近一次（1.1.0）是按外部静态审查修的 5 条 VD 问题，每条都有对应测试。
+
